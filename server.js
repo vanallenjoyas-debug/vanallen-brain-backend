@@ -5,18 +5,16 @@ const fetch = require('node-fetch');
 const Anthropic = require('@anthropic-ai/sdk');
 require('dotenv').config();
 
+const VERSION = "1.1.0";
 const app = express();
-app.use(cors({ origin: ["https://vanallenjoyas-debug.github.io", "http://localhost:3001"] }));
+app.use(cors({ origin: ["https://vanallenjoyas-debug.github.io", "http://localhost:3001", "http://localhost:5500"] }));
 app.use(express.json());
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
 const IG_TOKEN = process.env.IG_TOKEN;
-const VERSION = "1.0.1";
-const IG_USER_ID = process.env.IG_USER_ID; // 17841429241098616
+const IG_USER_ID = process.env.IG_USER_ID;
 
-// ─── INIT DB ───────────────────────────────────────────────────────────────
 async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS va_posts (
@@ -32,73 +30,65 @@ async function initDB() {
       permalink TEXT,
       excluded BOOLEAN DEFAULT FALSE,
       comments_data JSONB,
-      analysis TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
-    CREATE TABLE IF NOT EXISTS va_brand_voice (
-      id SERIAL PRIMARY KEY,
-      content TEXT,
+    CREATE TABLE IF NOT EXISTS va_ignored_comments (
+      comment_hash TEXT PRIMARY KEY,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
   console.log('DB ready');
 }
 
-// ─── AUTH ───────────────────────────────────────────────────────────────────
+// VERSION
 app.get('/api/version', (req, res) => res.json({ version: VERSION }));
 
+// LOGIN
 app.post('/api/login', (req, res) => {
   const { password } = req.body;
   if (password === process.env.APP_PASSWORD) {
     res.json({ ok: true, token: 'va-session-ok' });
   } else {
-    res.status(401).json({ error: 'Contraseña incorrecta' });
+    res.status(401).json({ error: 'Contrasena incorrecta' });
   }
 });
 
-// ─── FETCH POSTS FROM INSTAGRAM ─────────────────────────────────────────────
+// SYNC POSTS
 app.post('/api/sync-posts', async (req, res) => {
   try {
     let url = `https://graph.facebook.com/v19.0/${IG_USER_ID}/media?fields=id,caption,timestamp,like_count,comments_count,media_type,thumbnail_url,permalink&limit=50&access_token=${IG_TOKEN}`;
     let allPosts = [];
 
-    // Paginar hasta traer todo el historial
     while (url) {
       const r = await fetch(url);
       const data = await r.json();
       if (data.error) throw new Error(data.error.message);
       allPosts = allPosts.concat(data.data || []);
-      url = data.paging?.next || null;
-      if (allPosts.length >= 500) break; // tope de seguridad
+      url = data.paging && data.paging.next ? data.paging.next : null;
+      if (allPosts.length >= 500) break;
     }
 
-    // Para cada post traer insights (alcance y guardados)
     let saved = 0;
     for (const post of allPosts) {
       let reach = 0, savedCount = 0;
       try {
-        const insR = await fetch(
-          `https://graph.facebook.com/v19.0/${post.id}/insights?metric=reach,saved&access_token=${IG_TOKEN}`
-        );
+        const insR = await fetch(`https://graph.facebook.com/v19.0/${post.id}/insights?metric=reach,saved&access_token=${IG_TOKEN}`);
         const ins = await insR.json();
         if (ins.data) {
           ins.data.forEach(m => {
-            if (m.name === 'reach') reach = m.values?.[0]?.value || 0;
-            if (m.name === 'saved') savedCount = m.values?.[0]?.value || 0;
+            if (m.name === 'reach') reach = (m.values && m.values[0]) ? m.values[0].value : 0;
+            if (m.name === 'saved') savedCount = (m.values && m.values[0]) ? m.values[0].value : 0;
           });
         }
-      } catch (e) { /* algunos posts no tienen insights */ }
+      } catch(e) {}
 
-      // Traer comentarios
       let commentsData = [];
       try {
-        const commR = await fetch(
-          `https://graph.facebook.com/v19.0/${post.id}/comments?fields=text,timestamp&limit=50&access_token=${IG_TOKEN}`
-        );
+        const commR = await fetch(`https://graph.facebook.com/v19.0/${post.id}/comments?fields=text,timestamp&limit=50&access_token=${IG_TOKEN}`);
         const comm = await commR.json();
         commentsData = comm.data || [];
-      } catch (e) {}
+      } catch(e) {}
 
       await pool.query(`
         INSERT INTO va_posts (id, caption, timestamp, like_count, comments_count, reach, saved, media_type, thumbnail_url, permalink, comments_data)
@@ -114,44 +104,46 @@ app.post('/api/sync-posts', async (req, res) => {
     }
 
     res.json({ ok: true, synced: saved });
-  } catch (e) {
+  } catch(e) {
     console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ─── GET POSTS ───────────────────────────────────────────────────────────────
+// GET POSTS
 app.get('/api/posts', async (req, res) => {
-  const { show_excluded } = req.query;
-  const rows = await pool.query(
-    `SELECT * FROM va_posts ${show_excluded ? '' : 'WHERE excluded = FALSE'} ORDER BY like_count DESC`
-  );
-  res.json(rows.rows);
+  try {
+    const { show_excluded } = req.query;
+    const rows = await pool.query(
+      `SELECT * FROM va_posts ${show_excluded ? '' : 'WHERE excluded = FALSE'} ORDER BY like_count DESC`
+    );
+    res.json(rows.rows);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// ─── EXCLUIR / INCLUIR POST ──────────────────────────────────────────────────
+// EXCLUIR / INCLUIR
 app.post('/api/posts/:id/exclude', async (req, res) => {
   await pool.query('UPDATE va_posts SET excluded=TRUE WHERE id=$1', [req.params.id]);
   res.json({ ok: true });
 });
-
 app.post('/api/posts/:id/include', async (req, res) => {
   await pool.query('UPDATE va_posts SET excluded=FALSE WHERE id=$1', [req.params.id]);
   res.json({ ok: true });
 });
 
-// ─── ANALIZAR PATRONES ────────────────────────────────────────────────────────
+// ANALIZAR PATRONES
 app.post('/api/analyze-patterns', async (req, res) => {
   try {
     const rows = await pool.query(
       'SELECT caption, like_count, comments_count, reach, saved, comments_data FROM va_posts WHERE excluded=FALSE ORDER BY like_count DESC LIMIT 100'
     );
 
+    if (!rows.rows.length) return res.status(400).json({ error: 'No hay posts para analizar' });
+
     const postsText = rows.rows.map((p, i) =>
-      `POST ${i+1}:
-Caption: ${p.caption}
-Likes: ${p.like_count} | Comentarios: ${p.comments_count} | Alcance: ${p.reach} | Guardados: ${p.saved}
-Comentarios usuarios: ${JSON.parse(p.comments_data || '[]').slice(0,5).map(c => c.text).join(' | ')}`
+      `POST ${i+1}:\nCaption: ${p.caption}\nLikes: ${p.like_count} | Comentarios: ${p.comments_count} | Alcance: ${p.reach} | Guardados: ${p.saved}\nComentarios usuarios: ${JSON.parse(p.comments_data || '[]').slice(0,5).map(c => c.text).join(' | ')}`
     ).join('\n\n---\n\n');
 
     const msg = await anthropic.messages.create({
@@ -159,45 +151,46 @@ Comentarios usuarios: ${JSON.parse(p.comments_data || '[]').slice(0,5).map(c => 
       max_tokens: 2000,
       messages: [{
         role: 'user',
-        content: `Sos un analista de contenido para Van Allen Joyas, una marca de joyería artesanal argentina que vende talismanes y joyas con simbolismo vikingo, celta, wicca y esotérico.
+        content: `Sos un analista de contenido para Van Allen Joyas, marca de joyeria artesanal argentina que vende talismanes y joyas con simbolismo vikingo, celta, wicca y esoterico.
 
-Analizá estos posts de Instagram y detectá patrones. Respondé en español con este formato:
+Analiza estos posts de Instagram y detecta patrones. Responde en espanol con este formato:
 
-**TEMÁTICAS QUE FUNCIONAN**
-[qué categorías de contenido generan más engagement]
+**TEMATICAS QUE FUNCIONAN**
+[que categorias de contenido generan mas engagement]
 
 **HOOKS QUE FUNCIONAN**
-[tipos de apertura/gancho que funcionan mejor]
+[tipos de apertura que funcionan mejor]
 
 **TONO QUE FUNCIONA**
-[descripción del tono y estilo que performa mejor]
+[descripcion del tono y estilo que performa mejor]
 
-**QUÉ DICE LA AUDIENCIA**
-[patrones en los comentarios, qué le interesa a la gente]
+**QUE DICE LA AUDIENCIA**
+[patrones en los comentarios]
 
 **LO QUE NO FUNCIONA**
-[qué tipo de posts tienen bajo rendimiento]
+[que tipo de posts tienen bajo rendimiento]
 
 **RECOMENDACIONES CONCRETAS**
-[3-5 acciones específicas para el contenido]
+[3-5 acciones especificas]
 
-Posts a analizar:
+Posts:
 ${postsText}`
       }]
     });
 
     res.json({ analysis: msg.content[0].text });
-  } catch (e) {
+  } catch(e) {
+    console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ─── GENERAR COPY ─────────────────────────────────────────────────────────────
+// GENERAR COPY
 app.post('/api/generate-copy', async (req, res) => {
   try {
-    const { tema, formato } = req.body; // formato: feed | reel | story
+    const { tema, formato } = req.body;
+    if (!tema) return res.status(400).json({ error: 'Falta el tema' });
 
-    // Traer los 10 mejores posts como referencia de voz
     const rows = await pool.query(
       'SELECT caption, like_count FROM va_posts WHERE excluded=FALSE ORDER BY like_count DESC LIMIT 10'
     );
@@ -208,51 +201,37 @@ app.post('/api/generate-copy', async (req, res) => {
       max_tokens: 1000,
       messages: [{
         role: 'user',
-        content: `Sos el copywriter de Van Allen Joyas. Una marca de joyería artesanal argentina que trabaja simbolismo vikingo, celta, wicca y esotérico. La audiencia se siente identificada con la cultura y los valores, no necesariamente practica la religión.
+        content: `Sos el copywriter de Van Allen Joyas. Marca de joyeria artesanal argentina con simbolismo vikingo, celta, wicca y esoterico. La audiencia se identifica con la cultura y los valores, no necesariamente practica la religion.
 
 VOZ DE LA MARCA:
 - Segunda persona informal (vos)
-- Evocador pero no fantástico
+- Evocador pero no fantastico
 - No autoproclamar calidad
-- Místico, con peso histórico y simbólico
-- Sin lenguaje de marketing genérico
+- Mistico, con peso historico y simbolico
+- Sin lenguaje de marketing generico
 
-POSTS QUE MEJOR FUNCIONARON (para tomar la voz):
+POSTS QUE MEJOR FUNCIONARON (referencia de voz):
 ${referencias}
 
-TAREA: Generá copy para ${formato || 'feed'} sobre el tema: "${tema}"
+TAREA: Genera copy para ${formato || 'feed'} sobre: "${tema}"
 
-Generá 3 versiones diferentes. Para cada una incluí:
-- Hook (primera línea gancho)
+Genera 3 versiones. Para cada una incluye:
+- Hook (primera linea gancho)
 - Cuerpo del texto
 - Call to action sutil`
       }]
     });
 
     res.json({ copy: msg.content[0].text });
-  } catch (e) {
+  } catch(e) {
+    console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ─── START ───────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, async () => {
-  await initDB();
-  console.log(`Van Allen Brain backend running on port ${PORT}`);
-});
-
-// ─── COMENTARIOS RELEVANTES ───────────────────────────────────────────────────
+// COMENTARIOS
 app.get('/api/comments', async (req, res) => {
   try {
-    // Traer comentarios ignorados
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS va_ignored_comments (
-        comment_hash TEXT PRIMARY KEY,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      )
-    `);
-
     const rows = await pool.query(
       `SELECT id, caption, like_count, comments_data FROM va_posts 
        WHERE excluded=FALSE AND comments_count > 0 
@@ -280,9 +259,7 @@ app.get('/api/comments', async (req, res) => {
       }
     }
 
-    // Ordenar por largo del comentario (comentarios largos = más relevantes)
     allComments.sort((a, b) => b.text.length - a.text.length);
-
     res.json(allComments.slice(0, 200));
   } catch(e) {
     res.status(500).json({ error: e.message });
@@ -301,7 +278,9 @@ app.post('/api/comments/ignore', async (req, res) => {
 app.post('/api/comments/analyze', async (req, res) => {
   try {
     const { comments } = req.body;
-    const texto = comments.map(c => `- "${c.text}" (en post sobre: ${c.post_caption})`).join('\n');
+    if (!comments || !comments.length) return res.status(400).json({ error: 'No hay comentarios' });
+
+    const texto = comments.map(c => `- "${c.text}" (en post: ${c.post_caption})`).join('\n');
 
     const msg = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
@@ -310,7 +289,7 @@ app.post('/api/comments/analyze', async (req, res) => {
         role: 'user',
         content: `Sos el analista de contenido de Van Allen Joyas, marca de joyeria con simbolismo vikingo, celta, wicca y esoterico.
 
-Analizá estos comentarios de la audiencia y extraé insights para crear contenido. Respondé en español con este formato:
+Analiza estos comentarios de la audiencia y extrae insights para crear contenido. Responde en espanol:
 
 **QUE QUIERE SABER LA AUDIENCIA**
 [preguntas frecuentes, temas que generan curiosidad]
@@ -322,7 +301,7 @@ Analizá estos comentarios de la audiencia y extraé insights para crear conteni
 [5-8 ideas especificas basadas en los comentarios]
 
 **FRASES QUE USA LA AUDIENCIA**
-[palabras y expresiones que podrias usar en tus copys]
+[palabras y expresiones para usar en copys]
 
 Comentarios:
 ${texto}`
@@ -333,4 +312,11 @@ ${texto}`
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// START
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, async () => {
+  await initDB();
+  console.log(`Van Allen Brain v${VERSION} running on port ${PORT}`);
 });
