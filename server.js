@@ -143,7 +143,7 @@ app.post('/api/analyze-patterns', async (req, res) => {
     if (!rows.rows.length) return res.status(400).json({ error: 'No hay posts para analizar' });
 
     const postsText = rows.rows.map((p, i) =>
-      `POST ${i+1}:\nCaption: ${p.caption}\nLikes: ${p.like_count} | Comentarios: ${p.comments_count} | Alcance: ${p.reach} | Guardados: ${p.saved}\nComentarios usuarios: ${JSON.parse(p.comments_data || '[]').slice(0,5).map(c => c.text).join(' | ')}`
+      `POST ${i+1}:\nCaption: ${p.caption}\nLikes: ${p.like_count} | Comentarios: ${p.comments_count} | Alcance: ${p.reach} | Guardados: ${p.saved}\nComentarios usuarios: ${( Array.isArray(p.comments_data) ? p.comments_data : (typeof p.comments_data === 'string' ? JSON.parse(p.comments_data || '[]') : p.comments_data || []) ).slice(0,5).map(c => c.text).join(' | ')}`
     ).join('\n\n---\n\n');
 
     const msg = await anthropic.messages.create({
@@ -244,7 +244,7 @@ app.get('/api/comments', async (req, res) => {
     let allComments = [];
     for (const post of rows.rows) {
       let comments = [];
-      try { comments = JSON.parse(post.comments_data || '[]'); } catch(e) {}
+      comments = Array.isArray(post.comments_data) ? post.comments_data : (typeof post.comments_data === 'string' ? JSON.parse(post.comments_data || '[]') : post.comments_data || []);
       for (const c of comments) {
         if (!c.text || c.text.trim().length < 5) continue;
         const hash = Buffer.from(post.id + c.text).toString('base64').slice(0, 32);
