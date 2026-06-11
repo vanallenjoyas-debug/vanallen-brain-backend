@@ -6,7 +6,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 require('dotenv').config();
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: ["https://vanallenjoyas-debug.github.io", "http://localhost:3001"] }));
 app.use(express.json());
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
