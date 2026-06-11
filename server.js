@@ -5,7 +5,7 @@ const fetch = require('node-fetch');
 const Anthropic = require('@anthropic-ai/sdk');
 require('dotenv').config();
 
-const VERSION = "1.1.0";
+const VERSION = "1.1.1";
 const app = express();
 app.use(cors({ origin: ["https://vanallenjoyas-debug.github.io", "http://localhost:3001", "http://localhost:5500"] }));
 app.use(express.json());
