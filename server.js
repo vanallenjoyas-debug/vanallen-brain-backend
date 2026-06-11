@@ -13,6 +13,7 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejec
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const IG_TOKEN = process.env.IG_TOKEN;
+const VERSION = "1.0.1";
 const IG_USER_ID = process.env.IG_USER_ID; // 17841429241098616
 
 // ─── INIT DB ───────────────────────────────────────────────────────────────
@@ -45,6 +46,8 @@ async function initDB() {
 }
 
 // ─── AUTH ───────────────────────────────────────────────────────────────────
+app.get('/api/version', (req, res) => res.json({ version: VERSION }));
+
 app.post('/api/login', (req, res) => {
   const { password } = req.body;
   if (password === process.env.APP_PASSWORD) {
