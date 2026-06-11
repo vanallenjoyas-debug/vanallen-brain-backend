@@ -241,3 +241,96 @@ app.listen(PORT, async () => {
   await initDB();
   console.log(`Van Allen Brain backend running on port ${PORT}`);
 });
+
+// ─── COMENTARIOS RELEVANTES ───────────────────────────────────────────────────
+app.get('/api/comments', async (req, res) => {
+  try {
+    // Traer comentarios ignorados
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS va_ignored_comments (
+        comment_hash TEXT PRIMARY KEY,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    const rows = await pool.query(
+      `SELECT id, caption, like_count, comments_data FROM va_posts 
+       WHERE excluded=FALSE AND comments_count > 0 
+       ORDER BY like_count DESC`
+    );
+
+    const ignored = await pool.query('SELECT comment_hash FROM va_ignored_comments');
+    const ignoredSet = new Set(ignored.rows.map(r => r.comment_hash));
+
+    let allComments = [];
+    for (const post of rows.rows) {
+      let comments = [];
+      try { comments = JSON.parse(post.comments_data || '[]'); } catch(e) {}
+      for (const c of comments) {
+        if (!c.text || c.text.trim().length < 5) continue;
+        const hash = Buffer.from(post.id + c.text).toString('base64').slice(0, 32);
+        if (ignoredSet.has(hash)) continue;
+        allComments.push({
+          hash,
+          text: c.text,
+          post_id: post.id,
+          post_caption: post.caption ? post.caption.slice(0, 60) : '',
+          post_likes: post.like_count
+        });
+      }
+    }
+
+    // Ordenar por largo del comentario (comentarios largos = más relevantes)
+    allComments.sort((a, b) => b.text.length - a.text.length);
+
+    res.json(allComments.slice(0, 200));
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/comments/ignore', async (req, res) => {
+  const { hash } = req.body;
+  await pool.query(
+    'INSERT INTO va_ignored_comments (comment_hash) VALUES ($1) ON CONFLICT DO NOTHING',
+    [hash]
+  );
+  res.json({ ok: true });
+});
+
+app.post('/api/comments/analyze', async (req, res) => {
+  try {
+    const { comments } = req.body;
+    const texto = comments.map(c => `- "${c.text}" (en post sobre: ${c.post_caption})`).join('\n');
+
+    const msg = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1500,
+      messages: [{
+        role: 'user',
+        content: `Sos el analista de contenido de Van Allen Joyas, marca de joyeria con simbolismo vikingo, celta, wicca y esoterico.
+
+Analizá estos comentarios de la audiencia y extraé insights para crear contenido. Respondé en español con este formato:
+
+**QUE QUIERE SABER LA AUDIENCIA**
+[preguntas frecuentes, temas que generan curiosidad]
+
+**EMOCIONES Y CREENCIAS**
+[que sienten, en que creen, como se identifican]
+
+**IDEAS DE CONTENIDO CONCRETAS**
+[5-8 ideas especificas basadas en los comentarios]
+
+**FRASES QUE USA LA AUDIENCIA**
+[palabras y expresiones que podrias usar en tus copys]
+
+Comentarios:
+${texto}`
+      }]
+    });
+
+    res.json({ analysis: msg.content[0].text });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
