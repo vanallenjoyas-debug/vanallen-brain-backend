@@ -5,7 +5,7 @@ const fetch = require('node-fetch');
 const Anthropic = require('@anthropic-ai/sdk');
 require('dotenv').config();
 
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 const app = express();
 app.use(cors({ origin: ["https://vanallenjoyas-debug.github.io", "http://localhost:3001", "http://localhost:5500"] }));
 app.use(express.json());
@@ -110,10 +110,12 @@ app.post('/api/sync-posts', async (req, res) => {
 // POSTS
 app.get('/api/posts', async (req, res) => {
   try {
-    const { show_excluded, sort, date_from, date_to } = req.query;
+    const { show_excluded, sort, date_from, date_to, media_type } = req.query;
     let where = show_excluded ? [] : ['excluded = FALSE'];
     if (date_from) where.push(`timestamp >= '${date_from}'`);
     if (date_to) where.push(`timestamp <= '${date_to} 23:59:59'`);
+    if (media_type === 'reels') where.push("media_type = 'VIDEO'");
+    if (media_type === 'images') where.push("media_type IN ('IMAGE','CAROUSEL_ALBUM')");
     const whereStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
     const sortMap = { likes:'like_count DESC', comments:'comments_count DESC', reach:'reach DESC', saved:'saved DESC', date_desc:'timestamp DESC', date_asc:'timestamp ASC' };
     const orderBy = sortMap[sort] || 'like_count DESC';
@@ -159,7 +161,9 @@ app.post('/api/saved/:key', async (req, res) => {
 // ANALIZAR PATRONES
 app.post('/api/analyze-patterns', async (req, res) => {
   try {
-    const rows = await pool.query('SELECT caption, manual_copy, like_count, comments_count, reach, saved, comments_data FROM va_posts WHERE excluded=FALSE ORDER BY like_count DESC LIMIT 100');
+    const { media_type: mt } = req.body;
+    const mtFilter = mt === 'reels' ? "AND media_type = 'VIDEO'" : mt === 'images' ? "AND media_type IN ('IMAGE','CAROUSEL_ALBUM')" : '';
+    const rows = await pool.query(`SELECT caption, manual_copy, like_count, comments_count, reach, saved, comments_data FROM va_posts WHERE excluded=FALSE ${mtFilter} ORDER BY like_count DESC LIMIT 100`);
     if (!rows.rows.length) return res.status(400).json({ error: 'No hay posts' });
     const postsText = rows.rows.map((p,i) => {
       const contenido = p.manual_copy || p.caption || '(sin texto)';
@@ -182,7 +186,9 @@ app.post('/api/generate-copy', async (req, res) => {
   try {
     const { tema, formato } = req.body;
     if (!tema) return res.status(400).json({ error: 'Falta el tema' });
-    const rows = await pool.query('SELECT caption, manual_copy, like_count FROM va_posts WHERE excluded=FALSE ORDER BY like_count DESC LIMIT 15');
+    const { media_type: mt } = req.body;
+    const mtFilter = mt === 'reels' ? "AND media_type = 'VIDEO'" : mt === 'images' ? "AND media_type IN ('IMAGE','CAROUSEL_ALBUM')" : '';
+    const rows = await pool.query(`SELECT caption, manual_copy, like_count FROM va_posts WHERE excluded=FALSE ${mtFilter} ORDER BY like_count DESC LIMIT 15`);
     const referencias = rows.rows.map(p=>p.manual_copy||p.caption).filter(Boolean).join('\n---\n');
     const msg = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514', max_tokens: 1000,
@@ -211,6 +217,8 @@ app.get('/api/comments', async (req, res) => {
     let where = ['excluded=FALSE', 'comments_count > 0'];
     if (date_from) where.push(`timestamp >= '${date_from}'`);
     if (date_to) where.push(`timestamp <= '${date_to} 23:59:59'`);
+    if (media_type === 'reels') where.push("media_type = 'VIDEO'");
+    if (media_type === 'images') where.push("media_type IN ('IMAGE','CAROUSEL_ALBUM')");
     const sortMap = { likes:'like_count DESC', date_desc:'timestamp DESC', date_asc:'timestamp ASC' };
     const orderBy = sortMap[sort] || 'like_count DESC';
     const rows = await pool.query(`SELECT id, caption, like_count, timestamp, comments_data FROM va_posts WHERE ${where.join(' AND ')} ORDER BY ${orderBy}`);
