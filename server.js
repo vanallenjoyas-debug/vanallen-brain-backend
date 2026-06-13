@@ -5,7 +5,7 @@ const fetch = require('node-fetch');
 const Anthropic = require('@anthropic-ai/sdk');
 require('dotenv').config();
 
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 const app = express();
 app.use(cors({ origin: ["https://vanallenjoyas-debug.github.io", "http://localhost:3001", "http://localhost:5500"] }));
 app.use(express.json());
@@ -34,6 +34,7 @@ async function initDB() {
       saved INTEGER DEFAULT 0,
       media_type TEXT,
       thumbnail_url TEXT,
+      media_url TEXT,
       permalink TEXT,
       excluded BOOLEAN DEFAULT FALSE,
       comments_data JSONB,
@@ -41,6 +42,7 @@ async function initDB() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
     ALTER TABLE va_posts ADD COLUMN IF NOT EXISTS manual_copy TEXT;
+    ALTER TABLE va_posts ADD COLUMN IF NOT EXISTS media_url TEXT;
     CREATE TABLE IF NOT EXISTS va_ignored_comments (
       comment_hash TEXT PRIMARY KEY,
       created_at TIMESTAMPTZ DEFAULT NOW()
@@ -65,7 +67,7 @@ app.post('/api/login', (req, res) => {
 // SYNC
 app.post('/api/sync-posts', async (req, res) => {
   try {
-    let url = `https://graph.facebook.com/v19.0/${IG_USER_ID}/media?fields=id,caption,timestamp,like_count,comments_count,media_type,thumbnail_url,permalink&limit=50&access_token=${IG_TOKEN}`;
+    let url = `https://graph.facebook.com/v19.0/${IG_USER_ID}/media?fields=id,caption,timestamp,like_count,comments_count,media_type,thumbnail_url,media_url,permalink&limit=50&access_token=${IG_TOKEN}`;
     let allPosts = [];
     while (url) {
       const r = await fetch(url);
@@ -94,13 +96,13 @@ app.post('/api/sync-posts', async (req, res) => {
       } catch(e) {}
       // manual_copy NUNCA se toca
       await pool.query(`
-        INSERT INTO va_posts (id, caption, timestamp, like_count, comments_count, reach, saved, media_type, thumbnail_url, permalink, comments_data)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        INSERT INTO va_posts (id, caption, timestamp, like_count, comments_count, reach, saved, media_type, thumbnail_url, media_url, permalink, comments_data)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         ON CONFLICT (id) DO UPDATE SET
           caption=$2, like_count=$4, comments_count=$5, reach=$6, saved=$7,
-          thumbnail_url=$9, permalink=$10, comments_data=$11, updated_at=NOW()
+          thumbnail_url=$9, media_url=$10, permalink=$11, comments_data=$12, updated_at=NOW()
       `, [post.id, post.caption||'', post.timestamp, post.like_count||0, post.comments_count||0,
-          reach, savedCount, post.media_type, post.thumbnail_url, post.permalink, JSON.stringify(commentsData)]);
+          reach, savedCount, post.media_type, post.thumbnail_url, post.media_url, post.permalink, JSON.stringify(commentsData)]);
       saved++;
     }
     res.json({ ok: true, synced: saved });
