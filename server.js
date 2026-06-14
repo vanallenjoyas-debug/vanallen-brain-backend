@@ -5,7 +5,7 @@ const fetch = require('node-fetch');
 const Anthropic = require('@anthropic-ai/sdk');
 require('dotenv').config();
 
-const VERSION = "1.5.0";
+const VERSION = "1.6.0";
 const app = express();
 app.use(cors({ origin: ["https://vanallenjoyas-debug.github.io", "http://localhost:3001", "http://localhost:5500"] }));
 app.use(express.json());
@@ -27,6 +27,7 @@ async function initDB() {
       id TEXT PRIMARY KEY,
       caption TEXT,
       manual_copy TEXT,
+      gancho TEXT,
       timestamp TIMESTAMPTZ,
       like_count INTEGER DEFAULT 0,
       comments_count INTEGER DEFAULT 0,
@@ -42,6 +43,7 @@ async function initDB() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
     ALTER TABLE va_posts ADD COLUMN IF NOT EXISTS manual_copy TEXT;
+    ALTER TABLE va_posts ADD COLUMN IF NOT EXISTS gancho TEXT;
     ALTER TABLE va_posts ADD COLUMN IF NOT EXISTS media_url TEXT;
     CREATE TABLE IF NOT EXISTS va_ignored_comments (
       comment_hash TEXT PRIMARY KEY,
@@ -140,6 +142,15 @@ app.post('/api/posts/:id/copy', async (req, res) => {
   try {
     const { copy } = req.body;
     await pool.query('UPDATE va_posts SET manual_copy=$1 WHERE id=$2', [copy, req.params.id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// GUARDAR GANCHO — nunca se borra
+app.post("/api/posts/:id/gancho", async (req, res) => {
+  try {
+    const { gancho } = req.body;
+    await pool.query("UPDATE va_posts SET gancho=$1 WHERE id=$2", [gancho, req.params.id]);
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -264,6 +275,65 @@ app.post('/api/comments/analyze', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
+
+// GENERAR GANCHO
+app.post('/api/generate-gancho', async (req, res) => {
+  try {
+    const { tema, formato } = req.body;
+    if (!tema) return res.status(400).json({ error: 'Falta el tema' });
+    const { media_type: mt } = req.body;
+    const mtFilter = mt === 'reels' ? "AND media_type = 'VIDEO'" : mt === 'images' ? "AND media_type IN ('IMAGE','CAROUSEL_ALBUM')" : '';
+    
+    // Traer ganchos que funcionaron
+    const rows = await pool.query(`SELECT gancho, like_count, reach FROM va_posts WHERE excluded=FALSE AND gancho IS NOT NULL AND gancho != '' ${mtFilter} ORDER BY like_count DESC LIMIT 20`);
+    
+    if (!rows.rows.length) return res.status(400).json({ error: 'No hay ganchos cargados todavia. Carga los ganchos de tus mejores posts primero.' });
+    
+    const ganchosRef = rows.rows.map((p,i) => `${i+1}. "${p.gancho}" (${p.like_count.toLocaleString()} likes)`).join('\n');
+    
+    const msg = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514', max_tokens: 800,
+      messages: [{ role: 'user', content: `Sos el creador de contenido de Van Allen Joyas, marca argentina de joyeria esoterica con simbolismo vikingo, celta, wicca.
+
+Estos son los GANCHOS que mejor funcionaron en los posts (primera linea que aparece en pantalla):
+${ganchosRef}
+
+ANALIZA el patron de estos ganchos: que tienen en comun, que estructura usan, que emociones despiertan.
+
+Luego genera 5 ganchos nuevos para el tema: "${tema}" (formato: ${formato||'reel'})
+
+Los ganchos tienen que:
+- Ser de UNA sola linea, maxima 10 palabras
+- Generar curiosidad o identificacion inmediata
+- Seguir el patron de los que funcionaron
+- NO usar signos de exclamacion ni lenguaje de marketing
+
+Formato de respuesta:
+**PATRON DETECTADO**
+[descripcion breve del patron]
+
+**GANCHOS**
+1. [gancho]
+2. [gancho]
+3. [gancho]
+4. [gancho]
+5. [gancho]` }]
+    });
+    
+    const result = msg.content[0].text;
+    const key = 'gancho_' + tema.toLowerCase().replace(/\s+/g,'_').slice(0,40) + '_' + Date.now();
+    await pool.query(`INSERT INTO va_saved_results (key,content,updated_at) VALUES ($1,$2,NOW()) ON CONFLICT (key) DO UPDATE SET content=$2,updated_at=NOW()`, [key, JSON.stringify({tema, formato, result})]);
+    res.json({ result, key });
+  } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// HISTORIAL GANCHOS
+app.get('/api/gancho-history', async (req, res) => {
+  try {
+    const rows = await pool.query(`SELECT key, content, updated_at FROM va_saved_results WHERE key LIKE 'gancho_%' ORDER BY updated_at DESC LIMIT 50`);
+    res.json(rows.rows.map(r => ({ key: r.key, updated_at: r.updated_at, ...JSON.parse(r.content) })));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 app.listen(PORT, async () => {
   await initDB();
   console.log(`Van Allen Brain v${VERSION} running on port ${PORT}`);
